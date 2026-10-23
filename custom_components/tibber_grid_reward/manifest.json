@@ -1,12 +1,12 @@
 {
   "domain": "tibber_grid_reward",
   "name": "Tibber Grid Reward",
-  "codeowners": ["@JohNan"],
+  "codeowners": ["@hakannormark"],
   "config_flow": true,
-  "documentation": "https://github.com/JohNan/homeassistant-tibber_grid_rewards",
+  "documentation": "https://github.com/hakannormark/homeassistant-tibber_grid_rewards",
   "integration_type": "service",
   "iot_class": "cloud_push",
-  "issue_tracker": "https://github.com/JohNan/homeassistant-tibber_grid_rewards/issues",
+  "issue_tracker": "https://github.com/hakannormark/homeassistant-tibber_grid_rewards/issues",
   "requirements": [],
   "version": "1.0.0"
 }

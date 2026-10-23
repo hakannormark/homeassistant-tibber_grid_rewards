@@ -1,6 +1,7 @@
 """Platform for sensor integration."""
 
 import logging
+from dataclasses import dataclass
 from typing import Any
 
 from homeassistant.components.sensor import (
@@ -9,11 +10,12 @@ from homeassistant.components.sensor import (
     SensorEntityDescription,
     SensorStateClass,
 )
-from homeassistant.const import PERCENTAGE
+from homeassistant.const import PERCENTAGE, UnitOfEnergy
 from homeassistant.core import callback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.util import dt as dt_util
 
+from .charging_session import ChargingSessionCoordinator
 from .const import DOMAIN
 from .coordinator import TibberBatteryDataCoordinator
 from .public_client import TibberPublicAPI
@@ -136,6 +138,55 @@ VEHICLE_BATTERY_SENSOR_DESCRIPTION = SensorEntityDescription(
     state_class=SensorStateClass.MEASUREMENT,
 )
 
+SESSION_CURRENCY = "SEK"
+
+
+@dataclass(frozen=True, kw_only=True)
+class ChargingSessionSensorDescription(SensorEntityDescription):
+    """Describe a sensor for one field of the latest charging session."""
+
+    summary_key: str
+
+
+# Field names follow Tibber's charging summary, which matches the figures in
+# the app's smart charging timeline.
+CHARGING_SESSION_SENSORS: tuple[ChargingSessionSensorDescription, ...] = (
+    ChargingSessionSensorDescription(
+        key="charging_session_energy",
+        name="Session Energy",
+        device_class=SensorDeviceClass.ENERGY,
+        native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
+        summary_key="energyConsumed",
+    ),
+    ChargingSessionSensorDescription(
+        key="charging_session_cost",
+        name="Session Cost After Grid Rewards",
+        device_class=SensorDeviceClass.MONETARY,
+        native_unit_of_measurement=SESSION_CURRENCY,
+        summary_key="totalCost",
+    ),
+    ChargingSessionSensorDescription(
+        key="charging_session_grid_rewards",
+        name="Session Grid Rewards",
+        device_class=SensorDeviceClass.MONETARY,
+        native_unit_of_measurement=SESSION_CURRENCY,
+        summary_key="gridRewards",
+    ),
+    ChargingSessionSensorDescription(
+        key="charging_session_total_cost",
+        name="Session Total Cost Incl. Grid Fees",
+        device_class=SensorDeviceClass.MONETARY,
+        native_unit_of_measurement=SESSION_CURRENCY,
+        summary_key="total",
+    ),
+    ChargingSessionSensorDescription(
+        key="charging_session_average_price",
+        name="Session Average Price",
+        native_unit_of_measurement=f"{SESSION_CURRENCY}/kWh",
+        summary_key="averagePrice",
+    ),
+)
+
 
 async def async_setup_entry(hass, config_entry, async_add_entities):
     """Set up the sensor platform."""
@@ -235,6 +286,24 @@ async def async_setup_entry(hass, config_entry, async_add_entities):
                     async_add_entities,
                 )
                 vehicle_devices.append(manager)
+
+    vehicles = [device for device in flex_devices if device.get("type") == "vehicle"]
+    if vehicles:
+        charging_coordinator = ChargingSessionCoordinator(
+            hass,
+            api,
+            config_entry.data["home_id"],
+            [device["id"] for device in vehicles],
+            config_entry,
+        )
+        await charging_coordinator.async_refresh()
+        sensors.extend(
+            ChargingSessionSensor(
+                charging_coordinator, config_entry.entry_id, device, description
+            )
+            for device in vehicles
+            for description in CHARGING_SESSION_SENSORS
+        )
 
     hass.data[DOMAIN][config_entry.entry_id]["grid_reward_devices"].extend(
         grid_reward_sensors
@@ -869,3 +938,43 @@ class VehicleBatterySensor(SensorEntity):
         )
         self._apply_data(data)
         self.async_write_ha_state()
+
+
+class ChargingSessionSensor(
+    CoordinatorEntity[ChargingSessionCoordinator], SensorEntity
+):
+    """Sensor for one field of a vehicle's latest charging session."""
+
+    entity_description: ChargingSessionSensorDescription
+
+    def __init__(
+        self,
+        coordinator: ChargingSessionCoordinator,
+        entry_id: str,
+        device: dict,
+        description: ChargingSessionSensorDescription,
+    ) -> None:
+        """Initialize the charging session sensor."""
+        super().__init__(coordinator)
+        self.entity_description = description
+        self._entry_id = entry_id
+        self._device_id = device["id"]
+        self._device_name = device.get("name", self._device_id)
+        self._attr_unique_id = f"{self._device_id}_{description.key}"
+        self._attr_name = f"{self._device_name} {description.name}"
+
+    @property
+    def device_info(self):
+        return {
+            "identifiers": {(DOMAIN, self._device_id)},
+            "name": self._device_name,
+            "manufacturer": "Tibber",
+            "via_device": (DOMAIN, self._entry_id),
+        }
+
+    @property
+    def native_value(self) -> float | None:
+        """Return the field from the vehicle's latest charging session."""
+        snapshot = (self.coordinator.data or {}).get(self._device_id) or {}
+        summary = snapshot.get("summary") or {}
+        return summary.get(self.entity_description.summary_key)
