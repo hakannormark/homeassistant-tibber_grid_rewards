@@ -6,11 +6,13 @@ import logging
 from datetime import datetime, timedelta
 from typing import Any
 
+from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.util import dt as dt_util
 
 from .client import TibberAPI, TibberAuthError
+from .const import DOMAIN
 from .query_blocks import GraphQLQueryBlock, GraphQLQueryComposer
 
 _LOGGER = logging.getLogger(__name__)
@@ -86,6 +88,25 @@ class ChargingSessionBlock(GraphQLQueryBlock):
                 "summary": charging.get("summary"),
             }
         return snapshots
+
+
+def claimed_by_earlier_entry(
+    hass: HomeAssistant, config_entry: ConfigEntry, vehicle_id: str
+) -> bool:
+    """Return True if an entry created before this one already lists the vehicle.
+
+    Two homes can list the same vehicle. Only the earlier entry shows its session
+    sensors and polls the vehicle, so the vehicle is fetched once. Entry ids are
+    ULIDs, so sorting them orders the entries by creation time.
+    """
+    return any(
+        other.entry_id < config_entry.entry_id
+        and any(
+            device.get("id") == vehicle_id
+            for device in other.data.get("flex_devices", [])
+        )
+        for other in hass.config_entries.async_entries(DOMAIN)
+    )
 
 
 def _backoff(base: timedelta, failures: int) -> timedelta:

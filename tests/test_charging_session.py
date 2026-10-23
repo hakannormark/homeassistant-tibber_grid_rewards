@@ -16,6 +16,7 @@ from custom_components.tibber_grid_reward.charging_session import (
     ChargingSessionBlock,
     ChargingSessionCoordinator,
     _backoff,
+    claimed_by_earlier_entry,
 )
 from custom_components.tibber_grid_reward.client import (
     TibberAuthError,
@@ -305,3 +306,64 @@ async def test_setup_without_vehicles_skips_session_sensors(
     added = async_add_entities.call_args[0][0]
     assert not any(isinstance(e, ChargingSessionSensor) for e in added)
     mock_api.execute_query_blocks.assert_not_called()
+
+
+def _entry(entry_id: str, flex_devices: list[dict]) -> MagicMock:
+    entry = MagicMock(spec=ConfigEntry)
+    entry.entry_id = entry_id
+    entry.data = {"home_id": f"home-{entry_id}", "flex_devices": flex_devices}
+    return entry
+
+
+def test_earlier_entry_claims_a_shared_vehicle(mock_hass):
+    """A vehicle listed by an earlier entry is claimed by it, not by a later one."""
+    shared = {"id": VEHICLE_A, "type": "vehicle", "name": "Smurfen"}
+    only_later = {"id": VEHICLE_B, "type": "vehicle", "name": "Teslarossa"}
+    earlier = _entry("01A", [shared])
+    later = _entry("01B", [shared, only_later])
+    mock_hass.config_entries.async_entries.return_value = [earlier, later]
+
+    assert claimed_by_earlier_entry(mock_hass, later, VEHICLE_A)
+    assert not claimed_by_earlier_entry(mock_hass, later, VEHICLE_B)
+    assert not claimed_by_earlier_entry(mock_hass, earlier, VEHICLE_A)
+
+
+async def test_setup_skips_vehicles_claimed_by_earlier_entry(
+    mock_hass, mock_api, mock_config_entry
+):
+    """Only the vehicle the earlier entry does not list gets session sensors here."""
+    shared = {"id": VEHICLE_A, "type": "vehicle", "name": "Smurfen"}
+    only_later = {"id": VEHICLE_B, "type": "vehicle", "name": "Teslarossa"}
+    earlier = _entry("01A", [shared])
+    mock_config_entry.entry_id = "01B"
+    mock_config_entry.data = {
+        "home_id": "home1",
+        "flex_devices": [shared, only_later],
+    }
+    mock_hass.config_entries.async_entries.return_value = [earlier, mock_config_entry]
+    mock_hass.data[DOMAIN][mock_config_entry.entry_id] = {
+        "api": mock_api,
+        "public_api": None,
+        "flex_devices": [shared, only_later],
+        "grid_reward_devices": [],
+        "battery_coordinators": {},
+        "vehicle_devices": {VEHICLE_A: [], VEHICLE_B: []},
+        "daily_tracker": MagicMock(),
+        "session_tracker": MagicMock(),
+    }
+    mock_api.execute_query_blocks = AsyncMock(
+        return_value={
+            "charging_sessions": {
+                VEHICLE_B: {"chargingStatus": "charging", "summary": None},
+            }
+        }
+    )
+
+    async_add_entities = MagicMock()
+    await async_setup_entry(mock_hass, mock_config_entry, async_add_entities)
+
+    added = async_add_entities.call_args[0][0]
+    session_sensors = [e for e in added if isinstance(e, ChargingSessionSensor)]
+    assert len(session_sensors) == len(CHARGING_SESSION_SENSORS)
+    for sensor in session_sensors:
+        assert sensor.device_info["identifiers"] == {(DOMAIN, VEHICLE_B)}

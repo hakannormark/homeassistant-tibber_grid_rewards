@@ -15,7 +15,7 @@ from homeassistant.core import callback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.util import dt as dt_util
 
-from .charging_session import ChargingSessionCoordinator
+from .charging_session import ChargingSessionCoordinator, claimed_by_earlier_entry
 from .const import DOMAIN
 from .coordinator import TibberBatteryDataCoordinator
 from .public_client import TibberPublicAPI
@@ -287,7 +287,12 @@ async def async_setup_entry(hass, config_entry, async_add_entities):
                 )
                 vehicle_devices.append(manager)
 
-    vehicles = [device for device in flex_devices if device.get("type") == "vehicle"]
+    vehicles = [
+        device
+        for device in flex_devices
+        if device.get("type") == "vehicle"
+        and not claimed_by_earlier_entry(hass, config_entry, device["id"])
+    ]
     if vehicles:
         charging_coordinator = ChargingSessionCoordinator(
             hass,
