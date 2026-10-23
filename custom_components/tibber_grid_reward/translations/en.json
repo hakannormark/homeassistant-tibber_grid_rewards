@@ -56,8 +56,11 @@
             "init": {
                 "title": "Tibber Grid Reward Options",
                 "data": {
-                    "api_key": "API Key"
-                }
+                    "api_key": "API Key",
+                    "house_cost_entity": "Home's purchase cost today",
+                    "price_entity": "Spot price"
+                },
+                "description": "For the adjusted purchase sensor, pick the home's purchase cost today, the spot price, and each car's energy added sensor."
             }
         },
         "error": {

@@ -7,8 +7,15 @@ from homeassistant import config_entries
 from homeassistant.const import CONF_PASSWORD, CONF_USERNAME
 from homeassistant.core import callback
 from homeassistant.data_entry_flow import AbortFlow, FlowResult
+from homeassistant.helpers import selector
 from homeassistant.helpers.httpx_client import get_async_client
+from homeassistant.util import slugify
 
+from .adjusted_purchase import (
+    CONF_ENERGY_ENTITIES,
+    CONF_HOUSE_COST_ENTITY,
+    CONF_PRICE_ENTITY,
+)
 from .client import TibberAPI, TibberAuthError, TibberConnectionError
 from .const import CONF_API_KEY, DOMAIN
 from .public_client import TibberPublicAPI, TibberPublicAuthError, TibberPublicException
@@ -36,34 +43,74 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
         """Return the config entry for the options flow."""
         return self._config_entry
 
+    def _vehicle_fields(self) -> dict[str, str]:
+        """Return the form field for each vehicle's energy counter, by vehicle id."""
+        return {
+            device["id"]: f"energy_{slugify(device.get('name', device['id']))}"
+            for device in self.config_entry.data.get("flex_devices", [])
+            if device.get("type") == "vehicle"
+        }
+
     async def async_step_init(self, user_input=None):
         """Manage the options."""
         errors = {}
+        vehicle_fields = self._vehicle_fields()
         if user_input is not None:
             try:
-                token = user_input[CONF_API_KEY]
-                client = get_async_client(self.hass)
-                public_api = TibberPublicAPI(token, client)
+                token = user_input.get(CONF_API_KEY, "")
+                if token:
+                    client = get_async_client(self.hass)
+                    public_api = TibberPublicAPI(token, client)
+                    await public_api.get_homes()
 
-                await public_api.get_homes()
-
-                return self.async_create_entry(title="", data=user_input)
+                data = {CONF_API_KEY: token}
+                energy_entities = {
+                    vehicle_id: user_input[field]
+                    for vehicle_id, field in vehicle_fields.items()
+                    if user_input.get(field)
+                }
+                if energy_entities:
+                    data[CONF_ENERGY_ENTITIES] = energy_entities
+                for key in (CONF_HOUSE_COST_ENTITY, CONF_PRICE_ENTITY):
+                    if user_input.get(key):
+                        data[key] = user_input[key]
+                return self.async_create_entry(title="", data=data)
             except TibberPublicAuthError:
                 errors["base"] = "invalid_auth"
             except (TibberPublicException, Exception):
                 _LOGGER.exception("Unexpected exception")
                 errors["base"] = "unknown"
 
+        options = self.config_entry.options
+        sensor_selector = selector.EntitySelector(
+            selector.EntitySelectorConfig(domain="sensor")
+        )
+        schema: dict = {
+            vol.Optional(
+                CONF_API_KEY,
+                default=options.get(CONF_API_KEY, ""),
+            ): str,
+            vol.Optional(
+                CONF_HOUSE_COST_ENTITY,
+                description={"suggested_value": options.get(CONF_HOUSE_COST_ENTITY)},
+            ): sensor_selector,
+            vol.Optional(
+                CONF_PRICE_ENTITY,
+                description={"suggested_value": options.get(CONF_PRICE_ENTITY)},
+            ): sensor_selector,
+        }
+        energy_entities = options.get(CONF_ENERGY_ENTITIES) or {}
+        for vehicle_id, field in vehicle_fields.items():
+            schema[
+                vol.Optional(
+                    field,
+                    description={"suggested_value": energy_entities.get(vehicle_id)},
+                )
+            ] = sensor_selector
+
         return self.async_show_form(
             step_id="init",
-            data_schema=vol.Schema(
-                {
-                    vol.Optional(
-                        CONF_API_KEY,
-                        default=self.config_entry.options.get(CONF_API_KEY, ""),
-                    ): str
-                }
-            ),
+            data_schema=vol.Schema(schema),
             errors=errors,
         )
 

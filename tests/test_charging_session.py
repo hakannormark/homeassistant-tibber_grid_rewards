@@ -76,6 +76,7 @@ def mock_config_entry():
     entry.entry_id = "test_entry_id"
     entry.title = "Test home"
     entry.data = {"home_id": "home1", "flex_devices": []}
+    entry.options = {}
     return entry
 
 

@@ -332,3 +332,34 @@ async def test_unique_id_migration(hass: HomeAssistant):
         assert await async_setup_entry(hass, legacy_entry) is True
 
     assert legacy_entry.unique_id == f"{MOCK_USERNAME}_{MOCK_HOME_ID}"
+
+
+async def test_options_flow_saves_the_adjusted_purchase_entities(
+    hass: HomeAssistant, mock_tibber_public_api
+):
+    """Each vehicle gets its own energy field, saved under its vehicle id."""
+    data = {
+        **MOCK_CONFIG_DATA,
+        "flex_devices": [{"id": "car-1", "type": "vehicle", "name": "Smurfen GR"}],
+    }
+    mock_entry = MockConfigEntry(domain=DOMAIN, data=data, options={})
+    mock_entry.add_to_hass(hass)
+
+    result = await hass.config_entries.options.async_init(mock_entry.entry_id)
+    result2 = await hass.config_entries.options.async_configure(
+        result["flow_id"],
+        user_input={
+            CONF_API_KEY: "",
+            "house_cost_entity": "sensor.house_cost",
+            "price_entity": "sensor.price",
+            "energy_smurfen_gr": "sensor.smurfen_energy_added",
+        },
+    )
+
+    assert result2["type"] == FlowResultType.CREATE_ENTRY
+    assert result2["data"] == {
+        CONF_API_KEY: "",
+        "house_cost_entity": "sensor.house_cost",
+        "price_entity": "sensor.price",
+        "energy_entities": {"car-1": "sensor.smurfen_energy_added"},
+    }
