@@ -12,10 +12,15 @@ from homeassistant.components.sensor import (
 )
 from homeassistant.const import PERCENTAGE, UnitOfEnergy
 from homeassistant.core import callback
+from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.util import dt as dt_util
 
-from .charging_session import ChargingSessionCoordinator, claimed_by_earlier_entry
+from .charging_session import (
+    DAILY_COST_STORAGE_VERSION,
+    ChargingSessionCoordinator,
+    claimed_by_earlier_entry,
+)
 from .const import DOMAIN
 from .coordinator import TibberBatteryDataCoordinator
 from .public_client import TibberPublicAPI
@@ -187,6 +192,14 @@ CHARGING_SESSION_SENSORS: tuple[ChargingSessionSensorDescription, ...] = (
     ),
 )
 
+CHARGING_COST_TODAY_DESCRIPTION = ChargingSessionSensorDescription(
+    key="charging_cost_today",
+    name="Charging Cost Today (Net)",
+    device_class=SensorDeviceClass.MONETARY,
+    native_unit_of_measurement=SESSION_CURRENCY,
+    summary_key="totalCost",
+)
+
 
 async def async_setup_entry(hass, config_entry, async_add_entities):
     """Set up the sensor platform."""
@@ -300,14 +313,37 @@ async def async_setup_entry(hass, config_entry, async_add_entities):
             config_entry.data["home_id"],
             [device["id"] for device in vehicles],
             config_entry,
+            store=Store(
+                hass,
+                DAILY_COST_STORAGE_VERSION,
+                f"{DOMAIN}_daily_cost_{config_entry.entry_id}",
+            ),
         )
+        await charging_coordinator.daily_cost.async_load()
         await charging_coordinator.async_refresh()
+        hass.data[DOMAIN][config_entry.entry_id]["charging_session_coordinator"] = (
+            charging_coordinator
+        )
         sensors.extend(
             ChargingSessionSensor(
                 charging_coordinator, config_entry.entry_id, device, description
             )
             for device in vehicles
             for description in CHARGING_SESSION_SENSORS
+        )
+        sensors.extend(
+            ChargingCostTodaySensor(
+                charging_coordinator,
+                config_entry.entry_id,
+                device,
+                CHARGING_COST_TODAY_DESCRIPTION,
+            )
+            for device in vehicles
+        )
+        sensors.append(
+            ChargingCostTodayHomeSensor(
+                charging_coordinator, config_entry.entry_id, config_entry.title
+            )
         )
 
     hass.data[DOMAIN][config_entry.entry_id]["grid_reward_devices"].extend(
@@ -983,3 +1019,39 @@ class ChargingSessionSensor(
         snapshot = (self.coordinator.data or {}).get(self._device_id) or {}
         summary = snapshot.get("summary") or {}
         return summary.get(self.entity_description.summary_key)
+
+
+class ChargingCostTodaySensor(ChargingSessionSensor):
+    """Sensor for a vehicle's net charging cost so far today."""
+
+    @property
+    def native_value(self) -> float | None:
+        """Return today's net cost, summed over the vehicle's finished sessions."""
+        return self.coordinator.daily_cost.total(self._device_id)
+
+
+class ChargingCostTodayHomeSensor(
+    CoordinatorEntity[ChargingSessionCoordinator], SensorEntity
+):
+    """Net charging cost so far today, summed over the vehicles of one home."""
+
+    _attr_device_class = SensorDeviceClass.MONETARY
+    _attr_native_unit_of_measurement = SESSION_CURRENCY
+
+    def __init__(
+        self, coordinator: ChargingSessionCoordinator, entry_id: str, title: str
+    ) -> None:
+        """Initialize the home total sensor."""
+        super().__init__(coordinator)
+        self._attr_unique_id = f"{entry_id}_charging_cost_today_total"
+        self._attr_name = f"{title} Charging Cost Today (Net)"
+
+    @property
+    def native_value(self) -> float | None:
+        """Return the sum of today's net cost over this home's vehicles."""
+        known: list[float] = []
+        for vehicle_id in self.coordinator.vehicle_ids:
+            total = self.coordinator.daily_cost.total(vehicle_id)
+            if total is not None:
+                known.append(total)
+        return round(sum(known), 2) if known else None

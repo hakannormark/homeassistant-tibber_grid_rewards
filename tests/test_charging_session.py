@@ -15,6 +15,7 @@ from custom_components.tibber_grid_reward.charging_session import (
     MAX_BACKOFF,
     ChargingSessionBlock,
     ChargingSessionCoordinator,
+    DailyChargingCost,
     _backoff,
     claimed_by_earlier_entry,
 )
@@ -25,8 +26,11 @@ from custom_components.tibber_grid_reward.client import (
 from custom_components.tibber_grid_reward.const import DOMAIN
 from custom_components.tibber_grid_reward.query_blocks import GraphQLQueryComposer
 from custom_components.tibber_grid_reward.sensor import (
+    CHARGING_COST_TODAY_DESCRIPTION,
     CHARGING_SESSION_SENSORS,
     FLEX_DEVICE_SENSORS,
+    ChargingCostTodayHomeSensor,
+    ChargingCostTodaySensor,
     ChargingSessionSensor,
     FlexDeviceSensor,
     async_setup_entry,
@@ -70,6 +74,7 @@ def mock_config_entry():
     """Mock ConfigEntry instance."""
     entry = MagicMock(spec=ConfigEntry)
     entry.entry_id = "test_entry_id"
+    entry.title = "Test home"
     entry.data = {"home_id": "home1", "flex_devices": []}
     return entry
 
@@ -281,7 +286,7 @@ async def test_setup_adds_all_session_sensors_per_vehicle(
     await async_setup_entry(mock_hass, mock_config_entry, async_add_entities)
 
     added = async_add_entities.call_args[0][0]
-    session_sensors = [e for e in added if isinstance(e, ChargingSessionSensor)]
+    session_sensors = [e for e in added if type(e) is ChargingSessionSensor]
     assert len(session_sensors) == 2 * len(CHARGING_SESSION_SENSORS)
     assert mock_api.execute_query_blocks.await_count == 1
 
@@ -304,7 +309,7 @@ async def test_setup_without_vehicles_skips_session_sensors(
     await async_setup_entry(mock_hass, mock_config_entry, async_add_entities)
 
     added = async_add_entities.call_args[0][0]
-    assert not any(isinstance(e, ChargingSessionSensor) for e in added)
+    assert not any(type(e) is ChargingSessionSensor for e in added)
     mock_api.execute_query_blocks.assert_not_called()
 
 
@@ -363,7 +368,196 @@ async def test_setup_skips_vehicles_claimed_by_earlier_entry(
     await async_setup_entry(mock_hass, mock_config_entry, async_add_entities)
 
     added = async_add_entities.call_args[0][0]
-    session_sensors = [e for e in added if isinstance(e, ChargingSessionSensor)]
+    session_sensors = [e for e in added if type(e) is ChargingSessionSensor]
     assert len(session_sensors) == len(CHARGING_SESSION_SENSORS)
     for sensor in session_sensors:
         assert sensor.device_info["identifiers"] == {(DOMAIN, VEHICLE_B)}
+
+
+def _summary(energy: float, cost: float) -> dict:
+    return {
+        "energyConsumed": energy,
+        "totalCost": cost,
+        "gridRewards": 0.0,
+        "total": cost,
+        "averagePrice": cost / energy,
+    }
+
+
+def _state(status: str, summary: dict | None) -> dict:
+    return {"chargingStatus": status, "summary": summary}
+
+
+def test_daily_cost_does_not_count_the_first_summary_seen():
+    """A session that was already there when the integration started is a baseline."""
+    daily = DailyChargingCost()
+
+    daily.update({VEHICLE_A: _state("disconnected", _summary(3.0, -0.2))}, "2026-10-23")
+    daily.update({VEHICLE_A: _state("disconnected", _summary(3.0, -0.2))}, "2026-10-23")
+
+    assert daily.total(VEHICLE_A) == 0.0
+
+
+def test_daily_cost_counts_a_finished_session_after_two_stable_polls():
+    daily = DailyChargingCost()
+    daily.update({VEHICLE_A: _state("disconnected", _summary(3.0, -0.2))}, "2026-10-23")
+
+    daily.update({VEHICLE_A: _state("disconnected", _summary(9.9, 3.6))}, "2026-10-23")
+    assert daily.total(VEHICLE_A) == 0.0
+
+    daily.update({VEHICLE_A: _state("disconnected", _summary(9.9, 3.6))}, "2026-10-23")
+    assert daily.total(VEHICLE_A) == 3.6
+
+
+def test_daily_cost_ignores_a_session_while_the_car_is_plugged_in():
+    daily = DailyChargingCost()
+    daily.update({VEHICLE_A: _state("disconnected", _summary(3.0, -0.2))}, "2026-10-23")
+
+    for _ in range(3):
+        daily.update({VEHICLE_A: _state("charging", _summary(5.0, 1.0))}, "2026-10-23")
+
+    assert daily.total(VEHICLE_A) == 0.0
+
+
+def test_daily_cost_waits_for_a_summary_that_has_settled():
+    """A partial summary that changes between polls is not counted."""
+    daily = DailyChargingCost()
+    daily.update({VEHICLE_A: _state("disconnected", _summary(3.0, -0.2))}, "2026-10-23")
+
+    daily.update({VEHICLE_A: _state("disconnected", _summary(9.0, 3.0))}, "2026-10-23")
+    daily.update({VEHICLE_A: _state("disconnected", _summary(9.9, 3.6))}, "2026-10-23")
+    daily.update({VEHICLE_A: _state("disconnected", _summary(9.9, 3.6))}, "2026-10-23")
+
+    assert daily.total(VEHICLE_A) == 3.6
+
+
+def test_daily_cost_resets_at_midnight():
+    daily = DailyChargingCost()
+    daily.update({VEHICLE_A: _state("disconnected", _summary(3.0, -0.2))}, "2026-10-23")
+    daily.update({VEHICLE_A: _state("disconnected", _summary(9.9, 3.6))}, "2026-10-23")
+    daily.update({VEHICLE_A: _state("disconnected", _summary(9.9, 3.6))}, "2026-10-23")
+
+    daily.update({VEHICLE_A: _state("disconnected", _summary(9.9, 3.6))}, "2026-10-24")
+
+    assert daily.total(VEHICLE_A) == 0.0
+
+
+def test_daily_cost_is_unknown_before_the_first_summary():
+    daily = DailyChargingCost()
+
+    daily.update({VEHICLE_A: _state("disconnected", None)}, "2026-10-23")
+
+    assert daily.total(VEHICLE_A) is None
+
+
+async def test_daily_cost_survives_a_restart(mock_hass):
+    """The totals and the baseline are saved and restored, so a restart keeps them."""
+    saved: dict = {}
+    store = MagicMock()
+    store.async_save = AsyncMock(side_effect=lambda data: saved.update(data))
+    store.async_load = AsyncMock(side_effect=lambda: dict(saved))
+
+    before = DailyChargingCost(store)
+    before.update(
+        {VEHICLE_A: _state("disconnected", _summary(3.0, -0.2))}, "2026-10-23"
+    )
+    before.update({VEHICLE_A: _state("disconnected", _summary(9.9, 3.6))}, "2026-10-23")
+    before.update({VEHICLE_A: _state("disconnected", _summary(9.9, 3.6))}, "2026-10-23")
+    await before.async_save()
+
+    after = DailyChargingCost(store)
+    await after.async_load()
+
+    assert after.total(VEHICLE_A) == 3.6
+    after.update({VEHICLE_A: _state("disconnected", _summary(9.9, 3.6))}, "2026-10-23")
+    assert after.total(VEHICLE_A) == 3.6
+
+
+def test_today_sensor_shows_the_vehicles_total(mock_hass, mock_api, mock_config_entry):
+    coordinator = ChargingSessionCoordinator(
+        mock_hass, mock_api, "home1", [VEHICLE_A], mock_config_entry
+    )
+    coordinator.daily_cost.update(
+        {VEHICLE_A: _state("disconnected", _summary(3.0, -0.2))}, "2026-10-23"
+    )
+    coordinator.daily_cost.update(
+        {VEHICLE_A: _state("disconnected", _summary(9.9, 3.6))}, "2026-10-23"
+    )
+    coordinator.daily_cost.update(
+        {VEHICLE_A: _state("disconnected", _summary(9.9, 3.6))}, "2026-10-23"
+    )
+    sensor = ChargingCostTodaySensor(
+        coordinator,
+        "test_entry_id",
+        {"id": VEHICLE_A, "name": "Smurfen"},
+        CHARGING_COST_TODAY_DESCRIPTION,
+    )
+
+    assert sensor.native_value == 3.6
+    assert sensor.unique_id == f"{VEHICLE_A}_charging_cost_today"
+
+
+def test_home_sensor_sums_only_its_own_vehicles(mock_hass, mock_api, mock_config_entry):
+    """A home's total leaves out vehicles that belong to another home."""
+    coordinator = ChargingSessionCoordinator(
+        mock_hass, mock_api, "home1", [VEHICLE_A], mock_config_entry
+    )
+    for vehicle_id, cost in ((VEHICLE_A, 3.6), (VEHICLE_B, 1.4)):
+        coordinator.daily_cost.update(
+            {vehicle_id: _state("disconnected", _summary(3.0, -0.2))}, "2026-10-23"
+        )
+        coordinator.daily_cost.update(
+            {vehicle_id: _state("disconnected", _summary(9.9, cost))}, "2026-10-23"
+        )
+        coordinator.daily_cost.update(
+            {vehicle_id: _state("disconnected", _summary(9.9, cost))}, "2026-10-23"
+        )
+    sensor = ChargingCostTodayHomeSensor(coordinator, "01B", "Lokevägen 13 B")
+
+    assert sensor.native_value == 3.6
+    assert sensor.unique_id == "01B_charging_cost_today_total"
+    assert sensor.name == "Lokevägen 13 B Charging Cost Today (Net)"
+
+
+def test_home_sensor_is_unknown_before_any_summary(
+    mock_hass, mock_api, mock_config_entry
+):
+    coordinator = ChargingSessionCoordinator(
+        mock_hass, mock_api, "home1", [VEHICLE_A], mock_config_entry
+    )
+    sensor = ChargingCostTodayHomeSensor(coordinator, "01B", "Lokevägen 13 B")
+
+    assert sensor.native_value is None
+
+
+async def test_setup_creates_a_total_for_each_home_with_vehicles(
+    mock_hass, mock_api, mock_config_entry
+):
+    """Each home gets its own total, covering only the vehicles it owns."""
+    vehicles = [{"id": VEHICLE_A, "type": "vehicle", "name": "Smurfen"}]
+    mock_config_entry.entry_id = "01B"
+    mock_config_entry.title = "Lokevägen 13 B"
+    mock_config_entry.data = {"home_id": "home1", "flex_devices": vehicles}
+    mock_hass.data[DOMAIN] = {
+        "01B": {
+            "api": mock_api,
+            "public_api": None,
+            "flex_devices": vehicles,
+            "grid_reward_devices": [],
+            "battery_coordinators": {},
+            "vehicle_devices": {VEHICLE_A: []},
+            "daily_tracker": MagicMock(),
+            "session_tracker": MagicMock(),
+        }
+    }
+    mock_api.execute_query_blocks = AsyncMock(
+        return_value={"charging_sessions": {VEHICLE_A: _state("disconnected", None)}}
+    )
+
+    async_add_entities = MagicMock()
+    await async_setup_entry(mock_hass, mock_config_entry, async_add_entities)
+
+    added = async_add_entities.call_args[0][0]
+    homes = [e for e in added if isinstance(e, ChargingCostTodayHomeSensor)]
+    assert len(homes) == 1
+    assert homes[0].name == "Lokevägen 13 B Charging Cost Today (Net)"

@@ -304,6 +304,7 @@ def mock_config_entry():
     """Mock ConfigEntry instance."""
     entry = MagicMock(spec=ConfigEntry)
     entry.entry_id = "test_entry_id"
+    entry.title = "Test home"
     entry.data = {
         "home_id": "test_home_id",
         "api_key": "test_api_key",

@@ -8,6 +8,7 @@ from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.util import dt as dt_util
 
@@ -36,6 +37,8 @@ SUMMARY_FIELDS = (
     "total",
     "averagePrice",
 )
+
+DAILY_COST_STORAGE_VERSION = 1
 
 
 class ChargingSessionBlock(GraphQLQueryBlock):
@@ -109,6 +112,81 @@ def claimed_by_earlier_entry(
     )
 
 
+def _local_today() -> str:
+    """Return today's date in the local time zone, as an ISO string."""
+    return dt_util.as_local(dt_util.utcnow()).date().isoformat()
+
+
+class DailyChargingCost:
+    """Add up each vehicle's finished charging sessions for the current day.
+
+    Tibber reports only the latest session, so a session is counted once its
+    summary stays the same on two polls in a row while the vehicle is
+    unplugged. The first summary seen for a vehicle is a baseline and is not
+    counted, so an old session never lands in today's total.
+    """
+
+    def __init__(self, store: Store | None = None) -> None:
+        """Initialize the accumulator, optionally persisted with a store."""
+        self._store = store
+        self._date: str | None = None
+        self._totals: dict[str, float] = {}
+        self._last_key: dict[str, list[float]] = {}
+        self._candidate: dict[str, list[float]] = {}
+
+    async def async_load(self) -> None:
+        """Restore the day's totals, so a restart does not reset them."""
+        if self._store is None:
+            return
+        data = await self._store.async_load() or {}
+        self._date = data.get("date")
+        self._totals = data.get("totals", {})
+        self._last_key = data.get("last_key", {})
+
+    async def async_save(self) -> None:
+        """Persist the day's totals."""
+        if self._store is None:
+            return
+        await self._store.async_save(
+            {"date": self._date, "totals": self._totals, "last_key": self._last_key}
+        )
+
+    def update(self, snapshots: dict[str, dict[str, Any]], today: str) -> None:
+        """Count the sessions that finished since the last update."""
+        if today != self._date:
+            self._date = today
+            self._totals = {}
+
+        for vehicle_id, snapshot in snapshots.items():
+            summary = snapshot.get("summary")
+            if not summary:
+                continue
+            key = [summary["energyConsumed"], summary["totalCost"]]
+            if vehicle_id not in self._last_key:
+                self._last_key[vehicle_id] = key
+                continue
+            if (
+                snapshot["chargingStatus"] != DISCONNECTED
+                or key == self._last_key[vehicle_id]
+            ):
+                self._candidate.pop(vehicle_id, None)
+                continue
+            if key == self._candidate.get(vehicle_id):
+                self._totals[vehicle_id] = (
+                    self._totals.get(vehicle_id, 0.0) + summary["totalCost"]
+                )
+                self._last_key[vehicle_id] = key
+                self._candidate.pop(vehicle_id, None)
+            else:
+                self._candidate[vehicle_id] = key
+
+    def total(self, vehicle_id: str) -> float | None:
+        """Return today's net cost for a vehicle, or None before its first summary."""
+        if vehicle_id not in self._last_key:
+            return None
+        return round(self._totals.get(vehicle_id, 0.0), 2)
+
+
 def _backoff(base: timedelta, failures: int) -> timedelta:
     """Return the wait after the given number of consecutive failures."""
     return min(base * 2 ** min(failures - 1, 8), MAX_BACKOFF)
@@ -128,6 +206,7 @@ class ChargingSessionCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]
         home_id: str,
         vehicle_ids: list[str],
         config_entry: Any,
+        store: Store | None = None,
     ) -> None:
         """Initialize the charging session coordinator."""
         super().__init__(
@@ -139,6 +218,8 @@ class ChargingSessionCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]
         )
         self.api = api
         self.home_id = home_id
+        self.vehicle_ids = vehicle_ids
+        self.daily_cost = DailyChargingCost(store)
         self._composer = GraphQLQueryComposer(
             blocks=[ChargingSessionBlock(vehicle_ids)],
             operation_name="GetChargingSessions",
@@ -163,6 +244,8 @@ class ChargingSessionCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]
         self._failures = 0
         snapshots: dict[str, dict[str, Any]] = raw.get("charging_sessions", {})
         self.update_interval = self._interval_for(snapshots)
+        self.daily_cost.update(snapshots, _local_today())
+        await self.daily_cost.async_save()
         return snapshots
 
     def _interval_for(self, snapshots: dict[str, dict[str, Any]]) -> timedelta:
