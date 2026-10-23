@@ -56,8 +56,11 @@
       "init": {
         "title": "Inställningar för Tibber Grid Rewards",
         "data": {
-          "api_key": "API-nyckel"
-        }
+          "api_key": "API-nyckel",
+          "house_cost_entity": "Husets elinköp idag",
+          "price_entity": "Spotpris"
+        },
+        "description": "För sensorn med justerat elinköp: välj husets elinköp idag, spotpriset och varje bils sensor för tillförd energi."
       }
     },
     "error": {

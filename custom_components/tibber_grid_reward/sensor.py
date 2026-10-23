@@ -12,10 +12,20 @@ from homeassistant.components.sensor import (
 )
 from homeassistant.const import PERCENTAGE, UnitOfEnergy
 from homeassistant.core import callback
+from homeassistant.helpers.event import async_track_state_change_event
 from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.util import dt as dt_util
 
+from .adjusted_purchase import (
+    ADJUSTED_PURCHASE_STORAGE_VERSION,
+    CONF_ENERGY_ENTITIES,
+    CONF_HOUSE_COST_ENTITY,
+    CONF_PRICE_ENTITY,
+    ChargingSpotTracker,
+    adjusted_purchase,
+    state_as_float,
+)
 from .charging_session import (
     DAILY_COST_STORAGE_VERSION,
     ChargingSessionCoordinator,
@@ -345,6 +355,37 @@ async def async_setup_entry(hass, config_entry, async_add_entities):
                 charging_coordinator, config_entry.entry_id, config_entry.title
             )
         )
+
+        options = config_entry.options
+        house_cost_entity = options.get(CONF_HOUSE_COST_ENTITY)
+        price_entity = options.get(CONF_PRICE_ENTITY)
+        energy_entities = {
+            vehicle_id: entity
+            for vehicle_id, entity in (options.get(CONF_ENERGY_ENTITIES) or {}).items()
+            if entity and vehicle_id in charging_coordinator.vehicle_ids
+        }
+        if house_cost_entity and price_entity and energy_entities:
+            tracker = ChargingSpotTracker(
+                hass,
+                energy_entities,
+                price_entity,
+                store=Store(
+                    hass,
+                    ADJUSTED_PURCHASE_STORAGE_VERSION,
+                    f"{DOMAIN}_adjusted_purchase_{config_entry.entry_id}",
+                ),
+            )
+            await tracker.async_start()
+            config_entry.async_on_unload(tracker.async_stop)
+            sensors.append(
+                AdjustedPurchaseTodaySensor(
+                    charging_coordinator,
+                    tracker,
+                    house_cost_entity,
+                    config_entry.entry_id,
+                    config_entry.title,
+                )
+            )
 
     hass.data[DOMAIN][config_entry.entry_id]["grid_reward_devices"].extend(
         grid_reward_sensors
@@ -1055,3 +1096,70 @@ class ChargingCostTodayHomeSensor(
             if total is not None:
                 known.append(total)
         return round(sum(known), 2) if known else None
+
+
+class AdjustedPurchaseTodaySensor(
+    CoordinatorEntity[ChargingSessionCoordinator], SensorEntity
+):
+    """The home's electricity purchase today, with car charging repriced.
+
+    Starts from the home's purchase cost today and swaps each car's charging,
+    valued at the spot price, for the session price after Grid Rewards.
+    """
+
+    _attr_device_class = SensorDeviceClass.MONETARY
+    _attr_native_unit_of_measurement = SESSION_CURRENCY
+
+    def __init__(
+        self,
+        coordinator: ChargingSessionCoordinator,
+        tracker: ChargingSpotTracker,
+        house_cost_entity: str,
+        entry_id: str,
+        title: str,
+    ) -> None:
+        """Initialize the adjusted purchase sensor."""
+        super().__init__(coordinator)
+        self._tracker = tracker
+        self._house_cost_entity = house_cost_entity
+        self._attr_unique_id = f"{entry_id}_adjusted_purchase_today"
+        self._attr_name = f"{title} Electricity Purchase Today (Adjusted)"
+
+    async def async_added_to_hass(self) -> None:
+        """Also update when the home's cost or the car's charging changes."""
+        await super().async_added_to_hass()
+        self.async_on_remove(
+            self._tracker.async_add_listener(self.async_write_ha_state)
+        )
+        self.async_on_remove(
+            async_track_state_change_event(
+                self.hass,
+                [self._house_cost_entity],
+                self._handle_house_cost,
+            )
+        )
+
+    @callback
+    def _handle_house_cost(self, _event) -> None:
+        """Update when the home's purchase cost changes."""
+        self.async_write_ha_state()
+
+    @property
+    def native_value(self) -> float | None:
+        """Return the adjusted purchase, or None without the home's cost."""
+        house_cost = state_as_float(self.hass.states.get(self._house_cost_entity))
+        if house_cost is None:
+            return None
+        return adjusted_purchase(house_cost, self.coordinator, self._tracker)
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Show what the adjustment is built from, per vehicle."""
+        attributes: dict[str, Any] = {}
+        for vehicle_id in self.coordinator.vehicle_ids:
+            spot = self._tracker.spot_price(vehicle_id)
+            attributes[vehicle_id] = {
+                "charged_energy_today": round(self._tracker.energy(vehicle_id), 2),
+                "spot_price": round(spot, 4) if spot is not None else None,
+            }
+        return attributes

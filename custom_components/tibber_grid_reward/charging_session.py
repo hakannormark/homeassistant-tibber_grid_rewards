@@ -131,6 +131,7 @@ class DailyChargingCost:
         self._store = store
         self._date: str | None = None
         self._totals: dict[str, float] = {}
+        self._energy: dict[str, float] = {}
         self._last_key: dict[str, list[float]] = {}
         self._candidate: dict[str, list[float]] = {}
 
@@ -141,6 +142,7 @@ class DailyChargingCost:
         data = await self._store.async_load() or {}
         self._date = data.get("date")
         self._totals = data.get("totals", {})
+        self._energy = data.get("energy", {})
         self._last_key = data.get("last_key", {})
 
     async def async_save(self) -> None:
@@ -148,7 +150,12 @@ class DailyChargingCost:
         if self._store is None:
             return
         await self._store.async_save(
-            {"date": self._date, "totals": self._totals, "last_key": self._last_key}
+            {
+                "date": self._date,
+                "totals": self._totals,
+                "energy": self._energy,
+                "last_key": self._last_key,
+            }
         )
 
     def update(self, snapshots: dict[str, dict[str, Any]], today: str) -> None:
@@ -156,6 +163,7 @@ class DailyChargingCost:
         if today != self._date:
             self._date = today
             self._totals = {}
+            self._energy = {}
 
         for vehicle_id, snapshot in snapshots.items():
             summary = snapshot.get("summary")
@@ -175,6 +183,9 @@ class DailyChargingCost:
                 self._totals[vehicle_id] = (
                     self._totals.get(vehicle_id, 0.0) + summary["totalCost"]
                 )
+                self._energy[vehicle_id] = (
+                    self._energy.get(vehicle_id, 0.0) + summary["energyConsumed"]
+                )
                 self._last_key[vehicle_id] = key
                 self._candidate.pop(vehicle_id, None)
             else:
@@ -185,6 +196,10 @@ class DailyChargingCost:
         if vehicle_id not in self._last_key:
             return None
         return round(self._totals.get(vehicle_id, 0.0), 2)
+
+    def energy(self, vehicle_id: str) -> float:
+        """Return the energy of the vehicle's sessions counted today, in kWh."""
+        return self._energy.get(vehicle_id, 0.0)
 
 
 def _backoff(base: timedelta, failures: int) -> timedelta:
