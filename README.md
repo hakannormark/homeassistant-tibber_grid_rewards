@@ -2,7 +2,9 @@
 
 This is a custom integration for Home Assistant that allows you to monitor and interact with the Tibber Grid Reward program.
 
-[![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=JohNan&repository=homeassistant-tibber_grid_rewards&category=integration)
+This repository is a fork of [JohNan/homeassistant-tibber_grid_rewards](https://github.com/JohNan/homeassistant-tibber_grid_rewards) (MIT). It adds per-vehicle charging session sensors, described below.
+
+[![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=hakannormark&repository=homeassistant-tibber_grid_rewards&category=integration)
 
 ## Features
 
@@ -14,6 +16,7 @@ This is a custom integration for Home Assistant that allows you to monitor and i
   - **Planned Activity Sensor**: Timestamp of the next scheduled charge/discharge event, with attributes containing the full quarter-hourly power flow and state-of-charge schedule through tomorrow.
 - **Modular GraphQL Query Engine**: Extensible query block engine (`GraphQLQueryBlock` and `GraphQLQueryComposer` in `query_blocks.py`) allowing arbitrary telemetry and query fragments with custom response parsers to be added without modifying core polling or coordinator logic.
 - **Flexible Device Sensors**: Provides sensors for the state and connectivity of your flexible devices (e.g., electric vehicles).
+- **Charging Session Sensors**: For each vehicle or charger, the latest smart charging session as shown in the Tibber app's timeline: session energy (kWh), cost after Grid Rewards, Grid Rewards earned, total cost including grid fees, and average price per kWh. Only the latest session is available from Tibber. The data is refreshed every 5 minutes while a vehicle is plugged in or was unplugged within the last hour, and every 2 hours otherwise. Failed logins back off for longer.
 - **Departure Time Control**: Allows you to set the departure time for your electric vehicles directly from Home Assistant.
 
 ## Architecture & Adding New Sensors
